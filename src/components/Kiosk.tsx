@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { TURN_BREAK } from "@/lib/clauses";
 import { OrderEngine } from "@/lib/engine";
 import type { InterpretRequest, InterpretResult } from "@/lib/jev";
-import { FLAVORS, MILKS, PRODUCTS, PRODUCT_BY_ID, SIZES, TEMPS, imageFor, money } from "@/lib/menu";
+import { EXTRA_SHOT, FLAVORS, ICED_DELTA, MILKS, PRODUCTS, PRODUCT_BY_ID, SIZES, TEMPS, imageFor, money } from "@/lib/menu";
 import { EMPTY_ORDER, lineName, linePrice, orderTotal, priceBreakdown, type CartLine, type OrderState } from "@/lib/order";
 import { VoiceSession } from "@/lib/voice";
 
@@ -246,51 +246,61 @@ function OrderScreen(props: {
   );
 }
 
+interface Option {
+  key: string;
+  label: string;
+  /** Nombre abreviado para cuando hay muchas tarjetas en pantalla. */
+  short: string;
+  /** Lo que suma o resta al precio elegir esta opción. */
+  delta: number;
+}
+
 interface Row {
   key: string;
   label: string;
-  options: string[];
+  options: Option[];
   active: number;
-  value: string;
-  extra: number;
 }
 
+const SHORT: Record<string, string> = { Deslactosada: "Deslact.", "Sin sabor": "Ninguno" };
+const opt = (key: string, label: string, delta: number): Option => ({ key, label, short: SHORT[label] ?? label, delta });
+
+/** Todas las opciones de cada característica, con su efecto en el precio. */
 function rowsFor(line: CartLine): Row[] {
   const p = PRODUCT_BY_ID[line.product];
   const rows: Row[] = [];
   if (p.hasSize) {
     const keys = Object.keys(SIZES) as (keyof typeof SIZES)[];
-    rows.push({ key: "size", label: "Tamaño", options: keys, active: keys.indexOf(line.size), value: SIZES[line.size].label, extra: SIZES[line.size].delta });
+    rows.push({ key: "size", label: "Tamaño", options: keys.map((k) => opt(k, SIZES[k].label, SIZES[k].delta)), active: keys.indexOf(line.size) });
   }
   if (p.shots) {
-    const opts = Array.from({ length: p.shots.max - p.shots.min + 1 }, (_, i) => String(p.shots!.min + i));
+    const { min, max, default: def } = p.shots;
+    const counts = Array.from({ length: max - min + 1 }, (_, i) => min + i);
     rows.push({
       key: "shots",
       label: "Espresso",
-      options: opts,
-      active: line.shots - p.shots.min,
-      value: `${line.shots} shot${line.shots === 1 ? "" : "s"}`,
-      extra: Math.max(0, line.shots - p.shots.default) * 0.8,
+      options: counts.map((n) => opt(String(n), `${n} shot${n === 1 ? "" : "s"}`, Math.max(0, n - def) * EXTRA_SHOT)),
+      active: line.shots - min,
     });
   }
   if (p.hasMilk) {
     const keys = Object.keys(MILKS) as (keyof typeof MILKS)[];
-    rows.push({ key: "milk", label: "Leche", options: keys, active: keys.indexOf(line.milk), value: MILKS[line.milk].label, extra: MILKS[line.milk].delta });
+    rows.push({ key: "milk", label: "Leche", options: keys.map((k) => opt(k, MILKS[k].label, MILKS[k].delta)), active: keys.indexOf(line.milk) });
   }
   rows.push({
     key: "temp",
     label: "Temp.",
-    options: p.temps,
+    options: p.temps.map((t) => opt(t, TEMPS[t].label, t === "frio" && p.defaultTemp === "caliente" ? ICED_DELTA : 0)),
     active: p.temps.indexOf(line.temp),
-    value: TEMPS[line.temp].label,
-    extra: line.temp === "frio" && p.defaultTemp === "caliente" ? 0.5 : 0,
   });
   if (p.hasFlavor) {
     const keys = Object.keys(FLAVORS) as (keyof typeof FLAVORS)[];
-    rows.push({ key: "flavor", label: "Sabor", options: keys, active: keys.indexOf(line.flavor), value: FLAVORS[line.flavor].label, extra: FLAVORS[line.flavor].delta });
+    rows.push({ key: "flavor", label: "Sabor", options: keys.map((k) => opt(k, FLAVORS[k].label, FLAVORS[k].delta)), active: keys.indexOf(line.flavor) });
   }
   return rows;
 }
+
+const deltaText = (d: number) => (d > 0 ? `+${money(d)}` : d < 0 ? `−${money(-d)}` : "+$0");
 
 function DrinkCard({ line, focused }: { line: CartLine; focused: boolean }) {
   const rows = useMemo(() => rowsFor(line), [line]);
@@ -299,7 +309,7 @@ function DrinkCard({ line, focused }: { line: CartLine; focused: boolean }) {
 
   // Resalta por un momento cada atributo que acaba de cambiar.
   useEffect(() => {
-    const now: Record<string, string> = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    const now: Record<string, string> = Object.fromEntries(rows.map((r) => [r.key, r.options[r.active]?.key ?? ""]));
     const diff = Object.keys(now).filter((k) => prev.current[k] !== undefined && prev.current[k] !== now[k]);
     prev.current = now;
     if (!diff.length) return;
@@ -337,13 +347,15 @@ function DrinkCard({ line, focused }: { line: CartLine; focused: boolean }) {
         {rows.map((r) => (
           <li key={r.key} className={changed[r.key] ? "changed" : ""}>
             <span className="row-label">{r.label}</span>
-            <span className="pips" aria-hidden>
+            <span className="chips" style={{ gridTemplateColumns: `repeat(${r.options.length}, minmax(0, 1fr))` }}>
               {r.options.map((o, i) => (
-                <i key={o} className={i === r.active ? "on" : ""} />
+                <span key={o.key} className={`chip ${i === r.active ? "on" : ""}`}>
+                  <span className="chip-name full">{o.label}</span>
+                  <span className="chip-name short">{o.short}</span>
+                  <span className="chip-delta">{deltaText(o.delta)}</span>
+                </span>
               ))}
             </span>
-            <span className="row-value">{r.value}</span>
-            <span className="row-extra">{r.extra > 0 ? `+${money(r.extra)}` : r.extra < 0 ? `−${money(-r.extra)}` : ""}</span>
           </li>
         ))}
       </ul>
