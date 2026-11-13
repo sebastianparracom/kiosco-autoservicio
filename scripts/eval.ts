@@ -1,9 +1,10 @@
-// Prueba el motor de pedido con frases en español, sin interfaz ni micrófono.
+// Prueba el motor de pedido con frases en español e inglés, sin interfaz ni micrófono.
 // Uso: npm run eval            → todos los casos
 //      npm run eval -- video   → solo los casos cuyo nombre contenga "video"
 import { TURN_BREAK } from "../src/lib/clauses";
 import { OrderEngine } from "../src/lib/engine";
 import { interpretClause } from "../src/lib/jev";
+import type { Lang } from "../src/lib/menu";
 import { describeLine, orderTotal } from "../src/lib/order";
 
 const key = process.env.OPENROUTER_API_KEY!;
@@ -13,6 +14,7 @@ const verbose = process.argv.includes("-v");
 
 interface Case {
   name: string;
+  lang?: Lang;
   /** Cada elemento es un turno de voz (una pausa entre ellos). */
   turns: string[];
   expect: string[];
@@ -89,6 +91,41 @@ const CASES: Case[] = [
     turns: ["me regalas un americano y un frappé con leche de avena"],
     expect: ["Tinto, mediano, caliente", "Granizado de café, mediano, frío, leche avena, 1 shot"],
   },
+  {
+    name: "en video",
+    lang: "en",
+    turns: [
+      "can I get a matcha",
+      "let's make it iced with oat milk",
+      "and can we add one cappuccino and one latte",
+      "actually can we add one more latte",
+      "for one of the lattes can we make it large and the other one small",
+      "and for the small one can we do three shots with oat milk",
+      "and let's make that one iced actually",
+      "awesome actually let's get rid of the cappuccino",
+    ],
+    expect: ["Matcha Latte, medium, iced, oat milk", "Latte, large, hot, whole milk, 2 shots", "Latte, small, iced, oat milk, 3 shots"],
+  },
+  {
+    name: "en cantidades",
+    lang: "en",
+    turns: ["two large cappuccinos and a small black coffee"],
+    expect: ["Cappuccino, large, hot, whole milk, 2 shots", "Cappuccino, large, hot, whole milk, 2 shots", "Black Coffee, small, hot"],
+  },
+  {
+    name: "en varios atributos",
+    lang: "en",
+    turns: ["I'd like an iced mocha with almond milk and caramel"],
+    expect: ["Mocha, medium, iced, almond milk, 2 shots, caramel flavor"],
+  },
+  { name: "en arrepentirse", lang: "en", turns: ["a latte please", "actually remove it"], expect: [] },
+  {
+    name: "en sinónimos",
+    lang: "en",
+    turns: ["hi can I get a frappuccino with oat milk and a hot cocoa"],
+    expect: ["Coffee Frappé, medium, iced, oat milk, 1 shot", "Hot Chocolate, medium, hot, whole milk"],
+  },
+
 ];
 
 const latencies: number[] = [];
@@ -101,7 +138,7 @@ for (const c of cases) {
     latencies.push(r.ms);
     if (verbose) console.log(`    [${r.ms}ms] "${req.fragment}" →`, JSON.stringify(r.interpretation));
     return r;
-  });
+  }, c.lang ?? "es");
   // Igual que en vivo: la frase crece palabra por palabra y se recalcula cada vez.
   const words = c.turns.flatMap((t) => [...t.split(" "), TURN_BREAK]);
   let text = "";
@@ -111,7 +148,7 @@ for (const c of cases) {
     text += (text ? " " : "") + w;
     if (w !== TURN_BREAK) continue; // en modo normal solo se evalúa al final de cada turno
     const r = await engine.compute(text);
-    got = r.state.lines.map(describeLine);
+    got = r.state.lines.map((l) => describeLine(l, c.lang ?? "es"));
     total = orderTotal(r.state.lines);
   }
   const ok = JSON.stringify(got) === JSON.stringify(c.expect);

@@ -10,7 +10,9 @@ import {
   PRODUCT_BY_ID,
   SIZES,
   TEMPS,
+  type Currency,
   type Flavor,
+  type Lang,
   type Milk,
   type ProductId,
   type Size,
@@ -96,46 +98,62 @@ export interface PriceLine {
   amount: number;
 }
 
-/** Desglose del precio de una bebida: base + cada modificación. */
-export function priceBreakdown(line: CartLine): PriceLine[] {
+const L = {
+  es: { size: "Tamaño", iced: "Frío", base: "base" },
+  en: { size: "Size", iced: "Iced", base: "base" },
+} as const;
+
+/** Desglose del precio de una bebida: base + cada modificación, en la moneda elegida. */
+export function priceBreakdown(line: CartLine, cur: Currency = "USD", lang: Lang = "es"): PriceLine[] {
   const p = PRODUCT_BY_ID[line.product];
-  const out: PriceLine[] = [{ label: `${p.name} (base)`, amount: p.basePrice }];
-  if (p.hasSize && SIZES[line.size].delta !== 0)
-    out.push({ label: `Tamaño ${SIZES[line.size].label.toLowerCase()}`, amount: SIZES[line.size].delta });
-  if (line.temp === "frio" && p.defaultTemp === "caliente") out.push({ label: "Frío", amount: ICED_DELTA });
-  if (p.hasMilk && MILKS[line.milk].delta !== 0)
-    out.push({ label: `Leche de ${MILKS[line.milk].label.toLowerCase()}`, amount: MILKS[line.milk].delta });
+  const t = L[lang];
+  const low = (x: string) => x.toLowerCase();
+  const out: PriceLine[] = [{ label: `${p.name[lang]} (${t.base})`, amount: p.basePrice[cur] }];
+  if (p.hasSize && SIZES[line.size].delta[cur] !== 0)
+    out.push({ label: `${t.size} ${low(SIZES[line.size].label[lang])}`, amount: SIZES[line.size].delta[cur] });
+  if (line.temp === "frio" && p.defaultTemp === "caliente") out.push({ label: t.iced, amount: ICED_DELTA[cur] });
+  if (p.hasMilk && MILKS[line.milk].delta[cur] !== 0) {
+    const m = MILKS[line.milk].label;
+    out.push({ label: lang === "es" ? `Leche de ${low(m.es)}` : `${m.en} milk`, amount: MILKS[line.milk].delta[cur] });
+  }
   if (p.shots && line.shots > p.shots.default) {
     const extra = line.shots - p.shots.default;
-    out.push({ label: `${extra} shot${extra > 1 ? "s" : ""} extra`, amount: extra * EXTRA_SHOT });
+    const shots = `shot${extra > 1 ? "s" : ""}`;
+    out.push({ label: lang === "es" ? `${extra} ${shots} extra` : `${extra} extra ${shots}`, amount: extra * EXTRA_SHOT[cur] });
   }
-  if (p.hasFlavor && line.flavor !== "ninguno")
-    out.push({ label: `Sabor ${FLAVORS[line.flavor].label.toLowerCase()}`, amount: FLAVORS[line.flavor].delta });
+  if (p.hasFlavor && line.flavor !== "ninguno") {
+    const f = FLAVORS[line.flavor].label[lang];
+    out.push({ label: lang === "es" ? `Sabor ${low(f)}` : `${f} flavor`, amount: FLAVORS[line.flavor].delta[cur] });
+  }
   return out;
 }
 
-export function linePrice(line: CartLine): number {
-  return Math.round(priceBreakdown(line).reduce((s, x) => s + x.amount, 0) * 100) / 100;
+const round = (n: number, cur: Currency) => (cur === "COP" ? Math.round(n) : Math.round(n * 100) / 100);
+
+export function linePrice(line: CartLine, cur: Currency = "USD"): number {
+  return round(priceBreakdown(line, cur).reduce((s, x) => s + x.amount, 0), cur);
 }
 
-export function orderTotal(lines: CartLine[]): number {
-  return Math.round(lines.reduce((s, l) => s + linePrice(l), 0) * 100) / 100;
+export function orderTotal(lines: CartLine[], cur: Currency = "USD"): number {
+  return round(lines.reduce((s, l) => s + linePrice(l, cur), 0), cur);
 }
 
-export function lineName(line: CartLine): string {
+export function lineName(line: CartLine, lang: Lang = "es"): string {
   const p = PRODUCT_BY_ID[line.product];
-  return line.temp === "frio" && p.coldName ? p.coldName : p.name;
+  return line.temp === "frio" && p.coldName ? p.coldName[lang] : p.name[lang];
 }
 
-/** Descripción en una frase, para el modelo y para el resumen. */
-export function describeLine(line: CartLine): string {
+/** Descripción en una frase, para el modelo y para las pruebas. */
+export function describeLine(line: CartLine, lang: Lang = "es"): string {
   const p = PRODUCT_BY_ID[line.product];
-  const parts = [p.name];
-  if (p.hasSize) parts.push(SIZES[line.size].label.toLowerCase());
-  parts.push(TEMPS[line.temp].label.toLowerCase());
-  if (p.hasMilk) parts.push(`leche ${MILKS[line.milk].label.toLowerCase()}`);
+  const low = (x: string) => x.toLowerCase();
+  const parts = [p.name[lang]];
+  if (p.hasSize) parts.push(low(SIZES[line.size].label[lang]));
+  parts.push(low(TEMPS[line.temp].label[lang]));
+  if (p.hasMilk) parts.push(lang === "es" ? `leche ${low(MILKS[line.milk].label.es)}` : `${low(MILKS[line.milk].label.en)} milk`);
   if (p.shots) parts.push(`${line.shots} shot${line.shots === 1 ? "" : "s"}`);
-  if (p.hasFlavor && line.flavor !== "ninguno") parts.push(`sabor ${FLAVORS[line.flavor].label.toLowerCase()}`);
+  if (p.hasFlavor && line.flavor !== "ninguno")
+    parts.push(lang === "es" ? `sabor ${low(FLAVORS[line.flavor].label.es)}` : `${low(FLAVORS[line.flavor].label.en)} flavor`);
   return parts.join(", ");
 }
 

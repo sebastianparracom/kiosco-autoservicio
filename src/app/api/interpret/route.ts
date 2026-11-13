@@ -20,7 +20,8 @@ export async function POST(request: Request) {
     Array.isArray(body.lines) &&
     body.lines.length <= 8 &&
     body.lines.every((l) => l && PRODUCT_BY_ID[l.product]) &&
-    Array.isArray(body.focus);
+    Array.isArray(body.focus) &&
+    (body.lang === "es" || body.lang === "en");
   if (!valid) return Response.json({ error: "Solicitud inválida" }, { status: 400 });
 
   try {

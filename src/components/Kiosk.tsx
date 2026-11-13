@@ -1,23 +1,52 @@
 "use client";
 
 import { AnimatePresence, motion } from "motion/react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { TURN_BREAK } from "@/lib/clauses";
 import { OrderEngine } from "@/lib/engine";
+import { UI, type Strings } from "@/lib/i18n";
 import type { InterpretRequest, InterpretResult } from "@/lib/jev";
-import { EXTRA_SHOT, FLAVORS, ICED_DELTA, MILKS, PRODUCTS, PRODUCT_BY_ID, SIZES, TEMPS, imageFor, money } from "@/lib/menu";
+import {
+  EXTRA_SHOT,
+  FLAVORS,
+  ICED_DELTA,
+  MILKS,
+  PRODUCTS,
+  PRODUCT_BY_ID,
+  SIZES,
+  TEMPS,
+  imageFor,
+  money,
+  type Currency,
+  type Lang,
+  type Price,
+} from "@/lib/menu";
 import { EMPTY_ORDER, lineName, linePrice, orderTotal, priceBreakdown, type CartLine, type OrderState } from "@/lib/order";
 import { VoiceSession } from "@/lib/voice";
 
 type Phase = "inicio" | "pedido" | "resumen";
 
+/** Idioma y moneda elegidos en la pantalla de inicio; toda la interfaz los lee de aquí. */
+interface Settings {
+  lang: Lang;
+  currency: Currency;
+  t: Strings;
+  /** Formatea un precio en la moneda elegida. */
+  fmt: (n: number) => string;
+}
+
+const SettingsContext = createContext<Settings | null>(null);
+const useSettings = () => useContext(SettingsContext)!;
+
 async function interpretRemote(req: InterpretRequest): Promise<InterpretResult> {
   const res = await fetch("/api/interpret", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(req) });
-  if (!res.ok) throw new Error("No se pudo interpretar el pedido");
+  if (!res.ok) throw new Error(UI[req.lang].interpretError);
   return (await res.json()) as InterpretResult;
 }
 
 export default function Kiosk() {
+  const [lang, setLang] = useState<Lang>("es");
+  const [currency, setCurrency] = useState<Currency>("COP");
   const [phase, setPhase] = useState<Phase>("inicio");
   const [order, setOrder] = useState<OrderState>(EMPTY_ORDER);
   const [heard, setHeard] = useState("");
@@ -32,6 +61,15 @@ export default function Kiosk() {
   const seq = useRef(0);
   const applied = useRef(0);
   const typedTurns = useRef<string[]>([]);
+
+  const settings = useMemo<Settings>(
+    () => ({ lang, currency, t: UI[lang], fmt: (n: number) => money(n, currency, lang) }),
+    [lang, currency],
+  );
+
+  useEffect(() => {
+    document.documentElement.lang = lang;
+  }, [lang]);
 
   /** Llega texto nuevo (voz o teclado): se recalcula el pedido y gana el resultado más reciente. */
   const onText = useCallback((fullText: string) => {
@@ -49,33 +87,36 @@ export default function Kiosk() {
       .catch((e) => setError(String(e.message ?? e)));
   }, []);
 
-  const begin = useCallback(async (withMic: boolean) => {
-    setError(null);
-    setStarting(true);
-    engine.current = new OrderEngine(interpretRemote);
-    seq.current = applied.current = 0;
-    typedTurns.current = [];
-    setOrder(EMPTY_ORDER);
-    setHeard("");
-    setLatency(null);
-    // Calienta la conexión con el modelo para que la primera palabra no tarde.
-    void interpretRemote({ fragment: "quiero un café", before: "", lines: [], focus: [] }).catch(() => {});
-    if (withMic) {
-      const session = new VoiceSession({ onText, onLevel: setLevel, onError: setError });
-      try {
-        await session.start();
-        voice.current = session;
-        setTyping(false);
-      } catch (e) {
-        session.stop();
-        setError("No pudimos usar el micrófono. Puedes escribir tu pedido.");
-        setTyping(true);
-        console.error(e);
-      }
-    } else setTyping(true);
-    setStarting(false);
-    setPhase("pedido");
-  }, [onText]);
+  const begin = useCallback(
+    async (withMic: boolean) => {
+      setError(null);
+      setStarting(true);
+      engine.current = new OrderEngine(interpretRemote, lang);
+      seq.current = applied.current = 0;
+      typedTurns.current = [];
+      setOrder(EMPTY_ORDER);
+      setHeard("");
+      setLatency(null);
+      // Calienta la conexión con el modelo para que la primera palabra no tarde.
+      void interpretRemote({ fragment: UI[lang].warmup, before: "", lines: [], focus: [], lang }).catch(() => {});
+      if (withMic) {
+        const session = new VoiceSession({ onText, onLevel: setLevel, onError: setError }, lang);
+        try {
+          await session.start();
+          voice.current = session;
+          setTyping(false);
+        } catch (e) {
+          session.stop();
+          setError(UI[lang].micError);
+          setTyping(true);
+          console.error(e);
+        }
+      } else setTyping(true);
+      setStarting(false);
+      setPhase("pedido");
+    },
+    [onText, lang],
+  );
 
   const finish = useCallback(() => {
     voice.current?.stop();
@@ -125,27 +166,38 @@ export default function Kiosk() {
   );
 
   return (
-    <div className="viewport">
-      <div className="stage">
-        <AnimatePresence>
-          {phase === "inicio" && <StartScreen key="inicio" starting={starting} onStart={() => begin(true)} onType={() => begin(false)} />}
-          {phase === "pedido" && (
-            <OrderScreen
-              key="pedido"
-              order={order}
-              heard={heard}
-              latency={latency}
-              level={level}
-              error={error}
-              typing={typing}
-              onTyped={onTyped}
-              onFinish={finish}
-            />
-          )}
-          {phase === "resumen" && <SummaryScreen key="resumen" lines={order.lines} onRestart={restart} />}
-        </AnimatePresence>
+    <SettingsContext.Provider value={settings}>
+      <div className="viewport">
+        <div className="stage">
+          <AnimatePresence>
+            {phase === "inicio" && (
+              <StartScreen
+                key="inicio"
+                starting={starting}
+                onLang={setLang}
+                onCurrency={setCurrency}
+                onStart={() => begin(true)}
+                onType={() => begin(false)}
+              />
+            )}
+            {phase === "pedido" && (
+              <OrderScreen
+                key="pedido"
+                order={order}
+                heard={heard}
+                latency={latency}
+                level={level}
+                error={error}
+                typing={typing}
+                onTyped={onTyped}
+                onFinish={finish}
+              />
+            )}
+            {phase === "resumen" && <SummaryScreen key="resumen" lines={order.lines} onRestart={restart} />}
+          </AnimatePresence>
+        </div>
       </div>
-    </div>
+    </SettingsContext.Provider>
   );
 }
 
@@ -155,7 +207,41 @@ function Wordmark({ className = "" }: { className?: string }) {
   return <span className={`wordmark ${className}`}>Café Quindío</span>;
 }
 
-function StartScreen({ starting, onStart, onType }: { starting: boolean; onStart: () => void; onType: () => void }) {
+function Segmented<T extends string>(props: {
+  label: string;
+  value: T;
+  options: { value: T; title: string; sub: string }[];
+  onChange: (v: T) => void;
+}) {
+  return (
+    <div className="setting">
+      <span className="setting-label">{props.label}</span>
+      <div className="segmented" role="radiogroup" aria-label={props.label}>
+        {props.options.map((o) => (
+          <button
+            key={o.value}
+            role="radio"
+            aria-checked={o.value === props.value}
+            className={o.value === props.value ? "on" : ""}
+            onClick={() => props.onChange(o.value)}
+          >
+            <span className="seg-title">{o.title}</span>
+            <span className="seg-sub">{o.sub}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function StartScreen(props: {
+  starting: boolean;
+  onLang: (l: Lang) => void;
+  onCurrency: (c: Currency) => void;
+  onStart: () => void;
+  onType: () => void;
+}) {
+  const { lang, currency, t } = useSettings();
   return (
     <motion.section className="start" {...fade}>
       <div className="start-art" aria-hidden>
@@ -164,15 +250,35 @@ function StartScreen({ starting, onStart, onType }: { starting: boolean; onStart
         ))}
       </div>
       <div className="start-copy">
-        <p className="eyebrow">Expertos en café de especialidad</p>
+        <p className="eyebrow">{t.eyebrow}</p>
         <Wordmark className="wordmark-xl" />
-        <h1>Pide tu bebida hablando</h1>
-        <p className="lead">Toca empezar y dinos qué quieres tomar. Tu pedido aparece en pantalla mientras hablas.</p>
-        <button className="btn btn-primary btn-xl" onClick={onStart} disabled={starting}>
-          {starting ? "Preparando…" : "Empezar"}
+        <h1>{t.title}</h1>
+        <p className="lead">{t.lead}</p>
+        <div className="settings">
+          <Segmented
+            label={t.language}
+            value={lang}
+            onChange={props.onLang}
+            options={[
+              { value: "es", title: "Español", sub: "ES" },
+              { value: "en", title: "English", sub: "EN" },
+            ]}
+          />
+          <Segmented
+            label={t.currency}
+            value={currency}
+            onChange={props.onCurrency}
+            options={[
+              { value: "COP", title: "COP", sub: t.cop },
+              { value: "USD", title: "USD", sub: t.usd },
+            ]}
+          />
+        </div>
+        <button className="btn btn-primary btn-xl" onClick={props.onStart} disabled={props.starting}>
+          {props.starting ? t.preparing : t.start}
         </button>
-        <button className="link" onClick={onType} disabled={starting}>
-          Prefiero escribir mi pedido
+        <button className="link" onClick={props.onType} disabled={props.starting}>
+          {t.typeInstead}
         </button>
       </div>
     </motion.section>
@@ -190,9 +296,9 @@ function OrderScreen(props: {
   onFinish: () => void;
 }) {
   const { order, heard, latency, level, error, typing, onTyped, onFinish } = props;
+  const { lang, currency, t, fmt } = useSettings();
   const count = order.lines.length;
   const density = count <= 3 ? "lg" : count <= 5 ? "md" : count === 6 ? "md6" : "sm";
-  const total = orderTotal(order.lines);
 
   return (
     <motion.section className="order" {...fade}>
@@ -200,23 +306,23 @@ function OrderScreen(props: {
         <Wordmark />
         <div className="topbar-right">
           <div className="total">
-            <span className="total-label">{count === 1 ? "1 bebida" : `${count} bebidas`}</span>
-            <span className="total-amount">{money(total)}</span>
+            <span className="total-label">{t.drinks(count)}</span>
+            <span className="total-amount">{fmt(orderTotal(order.lines, currency))}</span>
           </div>
           <button className="btn btn-light" onClick={onFinish} disabled={count === 0}>
-            Finalizar
+            {t.finish}
           </button>
         </div>
       </header>
 
-      <nav className="menu" aria-label="Bebidas disponibles">
-        <span className="menu-title">Puedes pedir</span>
+      <nav className="menu" aria-label={t.menuAria}>
+        <span className="menu-title">{t.menuTitle}</span>
         <ul>
           {PRODUCTS.map((p) => (
             <li key={p.id} className={order.lines.some((l) => l.product === p.id) ? "in-order" : ""}>
               <img src={imageFor(p.id, p.defaultTemp)} alt="" />
-              <span className="menu-name">{p.name}</span>
-              <span className="menu-price">{money(p.basePrice)}</span>
+              <span className="menu-name">{p.name[lang]}</span>
+              <span className="menu-price">{fmt(p.basePrice[currency])}</span>
             </li>
           ))}
         </ul>
@@ -225,9 +331,9 @@ function OrderScreen(props: {
       <main className="cards" data-density={density}>
         {count === 0 && (
           <motion.div className="empty" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
-            <h2>¿Qué te preparamos hoy?</h2>
+            <h2>{t.emptyTitle}</h2>
             <p>
-              Di, por ejemplo: <em>“Quiero un capuchino grande con leche de avena”</em>
+              {t.emptyHint} <em>{t.emptyExample}</em>
             </p>
           </motion.div>
         )}
@@ -262,50 +368,58 @@ interface Row {
   active: number;
 }
 
-const SHORT: Record<string, string> = { Deslactosada: "Deslact.", "Sin sabor": "Ninguno" };
-const opt = (key: string, label: string, delta: number): Option => ({ key, label, short: SHORT[label] ?? label, delta });
-
 /** Todas las opciones de cada característica, con su efecto en el precio. */
-function rowsFor(line: CartLine): Row[] {
+function rowsFor(line: CartLine, lang: Lang, cur: Currency, t: Strings): Row[] {
   const p = PRODUCT_BY_ID[line.product];
+  const opt = (key: string, label: string, delta: Price | number): Option => ({
+    key,
+    label,
+    short: t.short[label] ?? label,
+    delta: typeof delta === "number" ? delta : delta[cur],
+  });
   const rows: Row[] = [];
   if (p.hasSize) {
     const keys = Object.keys(SIZES) as (keyof typeof SIZES)[];
-    rows.push({ key: "size", label: "Tamaño", options: keys.map((k) => opt(k, SIZES[k].label, SIZES[k].delta)), active: keys.indexOf(line.size) });
+    rows.push({ key: "size", label: t.rows.size, options: keys.map((k) => opt(k, SIZES[k].label[lang], SIZES[k].delta)), active: keys.indexOf(line.size) });
   }
   if (p.shots) {
     const { min, max, default: def } = p.shots;
     const counts = Array.from({ length: max - min + 1 }, (_, i) => min + i);
     rows.push({
       key: "shots",
-      label: "Espresso",
-      options: counts.map((n) => opt(String(n), `${n} shot${n === 1 ? "" : "s"}`, Math.max(0, n - def) * EXTRA_SHOT)),
+      label: t.rows.shots,
+      options: counts.map((n) => opt(String(n), `${n} shot${n === 1 ? "" : "s"}`, Math.max(0, n - def) * EXTRA_SHOT[cur])),
       active: line.shots - min,
     });
   }
   if (p.hasMilk) {
     const keys = Object.keys(MILKS) as (keyof typeof MILKS)[];
-    rows.push({ key: "milk", label: "Leche", options: keys.map((k) => opt(k, MILKS[k].label, MILKS[k].delta)), active: keys.indexOf(line.milk) });
+    rows.push({ key: "milk", label: t.rows.milk, options: keys.map((k) => opt(k, MILKS[k].label[lang], MILKS[k].delta)), active: keys.indexOf(line.milk) });
   }
   rows.push({
     key: "temp",
-    label: "Temp.",
-    options: p.temps.map((t) => opt(t, TEMPS[t].label, t === "frio" && p.defaultTemp === "caliente" ? ICED_DELTA : 0)),
+    label: t.rows.temp,
+    options: p.temps.map((tp) => opt(tp, TEMPS[tp].label[lang], tp === "frio" && p.defaultTemp === "caliente" ? ICED_DELTA[cur] : 0)),
     active: p.temps.indexOf(line.temp),
   });
   if (p.hasFlavor) {
     const keys = Object.keys(FLAVORS) as (keyof typeof FLAVORS)[];
-    rows.push({ key: "flavor", label: "Sabor", options: keys.map((k) => opt(k, FLAVORS[k].label, FLAVORS[k].delta)), active: keys.indexOf(line.flavor) });
+    rows.push({
+      key: "flavor",
+      label: t.rows.flavor,
+      options: keys.map((k) => opt(k, FLAVORS[k].label[lang], FLAVORS[k].delta)),
+      active: keys.indexOf(line.flavor),
+    });
   }
   return rows;
 }
 
-const deltaText = (d: number) => (d > 0 ? `+${money(d)}` : d < 0 ? `−${money(-d)}` : "+$0");
-
 function DrinkCard({ line, focused }: { line: CartLine; focused: boolean }) {
-  const rows = useMemo(() => rowsFor(line), [line]);
+  const { lang, currency, t, fmt } = useSettings();
+  const rows = useMemo(() => rowsFor(line, lang, currency, t), [line, lang, currency, t]);
   const prev = useRef<Record<string, string>>({});
   const [changed, setChanged] = useState<Record<string, number>>({});
+  const deltaText = (d: number) => (d > 0 ? `+${fmt(d)}` : d < 0 ? `−${fmt(-d)}` : "+$0");
 
   // Resalta por un momento cada atributo que acaba de cambiar.
   useEffect(() => {
@@ -341,8 +455,8 @@ function DrinkCard({ line, focused }: { line: CartLine; focused: boolean }) {
           />
         </AnimatePresence>
       </div>
-      <h3>{lineName(line)}</h3>
-      <div className="card-price">{money(linePrice(line))}</div>
+      <h3>{lineName(line, lang)}</h3>
+      <div className="card-price">{fmt(linePrice(line, currency))}</div>
       <ul className="rows">
         {rows.map((r) => (
           <li key={r.key} className={changed[r.key] ? "changed" : ""}>
@@ -371,6 +485,7 @@ function TranscriptBar(props: {
   onTyped: (value: string, commit: boolean) => void;
 }) {
   const { heard, latency, level, typing, onTyped } = props;
+  const { t } = useSettings();
   const [draft, setDraft] = useState("");
   const parts = heard.split(TURN_BREAK).map((s) => s.trim());
   const current = heard.trim().endsWith(TURN_BREAK) ? "" : (parts.pop() ?? "");
@@ -383,7 +498,7 @@ function TranscriptBar(props: {
           <input
             autoFocus
             value={draft}
-            placeholder="Escribe tu pedido y presiona Enter…"
+            placeholder={t.typePlaceholder}
             onChange={(e) => {
               setDraft(e.target.value);
               onTyped(e.target.value, false);
@@ -402,7 +517,7 @@ function TranscriptBar(props: {
             <span className="caret" />
           </p>
         ) : (
-          <p className="placeholder">Te escuchamos…</p>
+          <p className="placeholder">{t.listening}</p>
         )}
       </div>
       <span className="latency">{latency != null ? `${latency} ms` : ""}</span>
@@ -416,7 +531,7 @@ function TranscriptBar(props: {
 }
 
 function SummaryScreen({ lines, onRestart }: { lines: CartLine[]; onRestart: () => void }) {
-  const total = orderTotal(lines);
+  const { lang, currency, t, fmt } = useSettings();
   return (
     <motion.section className="summary" {...fade}>
       <header className="topbar">
@@ -424,35 +539,37 @@ function SummaryScreen({ lines, onRestart }: { lines: CartLine[]; onRestart: () 
       </header>
       <div className="summary-body">
         <div className="summary-head">
-          <p className="eyebrow">Resumen de tu pedido</p>
-          <h1>¡Gracias! Ya lo estamos preparando</h1>
+          <p className="eyebrow">{t.summaryEyebrow}</p>
+          <h1>{t.summaryTitle}</h1>
         </div>
         <ol className={`receipt ${lines.length > 4 ? "two" : ""}`}>
           {lines.map((line, i) => {
-            const [base, ...mods] = priceBreakdown(line);
+            const [base, ...mods] = priceBreakdown(line, currency, lang);
             return (
               <motion.li key={line.id} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.08 * i }}>
                 <img src={imageFor(line.product, line.temp)} alt="" />
                 <div className="receipt-main">
-                  <h3>{lineName(line)}</h3>
+                  <h3>{lineName(line, lang)}</h3>
                   <p>
                     {[
-                      `Base ${money(base.amount)}`,
-                      ...mods.map((m) => `${m.label} ${m.amount < 0 ? "−" : "+"}${money(Math.abs(m.amount))}`),
+                      `${t.base} ${fmt(base.amount)}`,
+                      ...mods.map((m) => `${m.label} ${m.amount < 0 ? "−" : "+"}${fmt(Math.abs(m.amount))}`),
                     ].join("  ·  ")}
                   </p>
                 </div>
-                <span className="receipt-price">{money(linePrice(line))}</span>
+                <span className="receipt-price">{fmt(linePrice(line, currency))}</span>
               </motion.li>
             );
           })}
         </ol>
         <div className={`summary-total ${lines.length > 4 ? "two" : ""}`}>
-          <span>Total</span>
-          <strong>{money(total)}</strong>
+          <span>{t.total}</span>
+          <strong>
+            {fmt(orderTotal(lines, currency))} <small className="currency-code">{currency}</small>
+          </strong>
         </div>
         <button className="btn btn-primary" onClick={onRestart}>
-          Nuevo pedido
+          {t.newOrder}
         </button>
       </div>
     </motion.section>

@@ -4,6 +4,7 @@
 // Recalcular siempre desde cero evita duplicados cuando la frase crece.
 import { isFiller, splitClauses } from "./clauses";
 import type { InterpretRequest, InterpretResult } from "./jev";
+import type { Lang } from "./menu";
 import { applyInterpretation, EMPTY_ORDER, type OrderState } from "./order";
 
 export type Interpreter = (req: InterpretRequest) => Promise<InterpretResult>;
@@ -16,21 +17,25 @@ export interface ComputeResult {
 
 export class OrderEngine {
   private cache = new Map<string, Promise<InterpretResult>>();
-  constructor(private interpret: Interpreter) {}
+  constructor(
+    private interpret: Interpreter,
+    private lang: Lang = "es",
+  ) {}
 
   async compute(fullText: string): Promise<ComputeResult> {
-    const clauses = splitClauses(fullText);
+    const clauses = splitClauses(fullText, this.lang);
     // El último fragmento sigue abierto mientras el cliente no haga una pausa.
     const lastIsOpen = !/[\u2016.,;!?]\s*$/.test(fullText);
     let state: OrderState = EMPTY_ORDER;
     let modelMs = 0;
     for (let i = 0; i < clauses.length; i++) {
       const fragment = clauses[i];
-      if (isFiller(fragment)) continue;
+      if (isFiller(fragment, this.lang)) continue;
       const req: InterpretRequest = {
         fragment,
         before: clauses.slice(Math.max(0, i - 2), i).join(" "),
         lines: state.lines,
+        lang: this.lang,
         focus: state.focus.map((id) => state.lines.findIndex((l) => l.id === id)).filter((x) => x >= 0),
       };
       const key = JSON.stringify(req);

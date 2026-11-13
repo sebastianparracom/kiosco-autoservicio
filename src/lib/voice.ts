@@ -1,12 +1,24 @@
 // Micrófono → AssemblyAI en tiempo real (WebSocket) → texto palabra por palabra.
-// Se usa el modelo "universal-streaming-multilingual" porque emite cada palabra
-// en cuanto la reconoce; el modelo más nuevo solo actualiza cada ~1 segundo.
+// Se usan los modelos "universal-streaming" porque emiten cada palabra en
+// cuanto la reconocen; el modelo más nuevo solo actualiza cada ~1 segundo.
 import { TURN_BREAK } from "./clauses";
+import type { Lang } from "./menu";
 
-const KEYTERMS = [
-  "tinto", "espresso", "capuchino", "latte", "mocca", "chocolate", "matcha", "chai", "cold brew", "granizado", "frappé",
-  "deslactosada", "leche de avena", "leche de almendra", "vainilla", "caramelo", "avellana", "shots",
-];
+const KEYTERMS: Record<Lang, string[]> = {
+  es: [
+    "tinto", "espresso", "capuchino", "latte", "mocca", "chocolate", "matcha", "chai", "cold brew", "granizado", "frappé",
+    "deslactosada", "leche de avena", "leche de almendra", "vainilla", "caramelo", "avellana", "shots",
+  ],
+  en: [
+    "black coffee", "tinto", "espresso", "cappuccino", "latte", "mocha", "hot chocolate", "matcha", "chai", "cold brew", "frappé",
+    "lactose-free", "oat milk", "almond milk", "vanilla", "caramel", "hazelnut", "shots", "iced",
+  ],
+};
+
+const ERRORS = {
+  es: { lost: "Se perdió la conexión de voz", closed: "Se cerró la conexión de voz", stt: "Error de transcripción" },
+  en: { lost: "The voice connection was lost", closed: "The voice connection closed", stt: "Transcription error" },
+};
 
 export interface VoiceCallbacks {
   /** Todo lo dicho en la sesión, con los turnos separados por TURN_BREAK. */
@@ -23,7 +35,10 @@ export class VoiceSession {
   private partial = "";
   private stopped = false;
 
-  constructor(private cb: VoiceCallbacks) {}
+  constructor(
+    private cb: VoiceCallbacks,
+    private lang: Lang = "es",
+  ) {}
 
   async start(): Promise<void> {
     this.stream = await navigator.mediaDevices.getUserMedia({
@@ -39,12 +54,13 @@ export class VoiceSession {
     const params = new URLSearchParams({
       token,
       sample_rate: String(this.ctx.sampleRate),
-      speech_model: "universal-streaming-multilingual",
-      language: "es",
+      ...(this.lang === "en"
+        ? { speech_model: "universal-streaming-english" }
+        : { speech_model: "universal-streaming-multilingual", language: "es" }),
       format_turns: "false",
       min_turn_silence: "350",
       max_turn_silence: "1000",
-      keyterms_prompt: JSON.stringify(KEYTERMS),
+      keyterms_prompt: JSON.stringify(KEYTERMS[this.lang]),
     });
     const ws = new WebSocket(`wss://streaming.assemblyai.com/v3/ws?${params}`);
     ws.binaryType = "arraybuffer";
@@ -54,8 +70,8 @@ export class VoiceSession {
       ws.onopen = () => resolve();
       ws.onerror = () => reject(new Error("No se pudo conectar con la transcripción"));
     });
-    ws.onerror = () => !this.stopped && this.cb.onError("Se perdió la conexión de voz");
-    ws.onclose = (e) => !this.stopped && e.code !== 1000 && this.cb.onError("Se cerró la conexión de voz");
+    ws.onerror = () => !this.stopped && this.cb.onError(ERRORS[this.lang].lost);
+    ws.onclose = (e) => !this.stopped && e.code !== 1000 && this.cb.onError(ERRORS[this.lang].closed);
     ws.onmessage = (e) => this.handle(JSON.parse(e.data as string));
 
     const source = this.ctx.createMediaStreamSource(this.stream);
@@ -68,7 +84,7 @@ export class VoiceSession {
   }
 
   private handle(m: { type: string; turn_order?: number; end_of_turn?: boolean; transcript?: string; error?: string }) {
-    if (m.type === "Error") return this.cb.onError(m.error ?? "Error de transcripción");
+    if (m.type === "Error") return this.cb.onError(m.error ?? ERRORS[this.lang].stt);
     if (m.type !== "Turn" || m.turn_order == null) return;
     const text = (m.transcript ?? "").trim();
     if (m.end_of_turn) {
